@@ -1,0 +1,53 @@
+services:
+  storage:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  broker:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
+  aggregator:
+    build: ./aggregator
+    depends_on: [storage, broker]
+    environment:
+      DATABASE_URL: postgres://user:pass@storage:5432/db
+      REDIS_URL: redis://broker:6379
+      REDIS_STREAM: log-events
+      REDIS_GROUP: agg-group
+      CONSUMER_WORKERS: 4
+    ports:
+      - "8080:8080"
+
+  publisher:
+    build: ./publisher
+    depends_on: [aggregator]
+    environment:
+      TARGET_URL: http://aggregator:8080/publish
+      TOTAL: 20000
+      DUP_RATIO: 0.35
+    profiles: ["load"]
+
+  tester:
+  build:
+    context: ./aggregator
+    args:
+      INSTALL_DEV: "1"
+  depends_on: [aggregator]
+  environment:
+    BASE_URL: http://aggregator:8080
+  volumes:
+    - ./tests:/tests:ro
+  entrypoint: ["pytest", "-q", "/tests"]
+  profiles: ["test"]
+
+
+volumes:
+  pg_data:
+  redis_data:
