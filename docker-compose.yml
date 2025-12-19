@@ -1,3 +1,4 @@
+
 services:
   storage:
     image: postgres:16-alpine
@@ -15,37 +16,41 @@ services:
 
   aggregator:
     build: ./aggregator
-    depends_on: [storage, broker]
+    depends_on:
+      - storage
+      - broker
     environment:
-      DATABASE_URL: postgres://user:pass@storage:5432/db
+      DATABASE_URL: postgresql://user:pass@storage:5432/db
       REDIS_URL: redis://broker:6379
       REDIS_STREAM: log-events
       REDIS_GROUP: agg-group
-      CONSUMER_WORKERS: 4
+      CONSUMER_WORKERS: "4"
     ports:
       - "8080:8080"
 
   publisher:
     build: ./publisher
-    depends_on: [aggregator]
+    depends_on:
+      - aggregator
     environment:
       TARGET_URL: http://aggregator:8080/publish
-      TOTAL: 20000
-      DUP_RATIO: 0.35
-    profiles: ["load"]
+      TOTAL: "20000"
+      DUP_RATIO: "0.35"
+    profiles:
+      - load
 
   tester:
-  build:
-    context: ./aggregator
-    args:
-      INSTALL_DEV: "1"
-  depends_on: [aggregator]
-  environment:
-    BASE_URL: http://aggregator:8080
-  volumes:
-    - ./tests:/tests:ro
-  entrypoint: ["pytest", "-q", "/tests"]
-  profiles: ["test"]
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    profiles: ["test"]
+    depends_on:
+      - aggregator
+    environment:
+      BASE_URL: http://aggregator:8080
+    networks:
+      - default
+
 
 
 volumes:

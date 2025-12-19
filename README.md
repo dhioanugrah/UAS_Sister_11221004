@@ -254,7 +254,7 @@ Video demo (YouTube Unlisted/Public) mencakup:
 6. Statistik & logging
 
 **Link video demo:** 
-taruh disini
+(https://www.youtube.com/watch?v=ttgDqlGxuzo)
 
 ---
  

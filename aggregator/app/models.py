@@ -1,13 +1,20 @@
-from pydantic import BaseModel, Field
-from typing import Any, Dict, List
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Dict, Any
 from datetime import datetime
 
 class Event(BaseModel):
-    topic: str = Field(min_length=1, max_length=128)
-    event_id: str = Field(min_length=8, max_length=256)
+    topic: str = Field(min_length=1)
+    event_id: str = Field(min_length=5)
     timestamp: datetime
-    source: str = Field(min_length=1, max_length=128)
+    source: str
     payload: Dict[str, Any]
 
 class PublishRequest(BaseModel):
     events: List[Event]
+
+    @field_validator("events")
+    @classmethod
+    def events_must_not_be_empty(cls, v):
+        if not v:
+            raise ValueError("events array must not be empty")
+        return v

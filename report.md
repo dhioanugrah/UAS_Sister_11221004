@@ -1,4 +1,3 @@
-
 # Laporan UAS Sistem Terdistribusi  
 ## Implementasi Pub-Sub Log Aggregator Terdistribusi dengan Idempotent Consumer, Deduplication, dan Kontrol Konkurensi
 
@@ -66,35 +65,88 @@ Sistem menerapkan model **eventual consistency**, di mana state akhir sistem aka
 ---
 
 ## 10. T8 – Desain Transaksi (Fokus Bab 8)
-Setiap event diproses dalam satu transaksi database yang mencakup proses pencatatan statistik, deduplication, dan penyimpanan event. Transaksi ini memastikan prinsip **ACID**, khususnya atomicity dan consistency.
+### 10.1 Keputusan Desain
+Setiap event diproses dalam satu transaksi database yang mencakup:
+1) deduplication (penandaan event pernah diproses),  
+2) penyimpanan event unik ke tabel `events`, dan  
+3) pembaruan metrik pada tabel `stats`.
 
-Dengan menggunakan transaksi, sistem dapat mencegah terjadinya lost update dan memastikan bahwa perubahan state hanya terjadi jika seluruh langkah pemrosesan event berhasil dijalankan.
+### 10.2 Alasan dan Trade-off
+Pada sistem pub-sub dengan model at-least-once, event dapat terkirim ulang (retry) atau terbaca ulang setelah crash. Tanpa transaksi, sistem rentan menghasilkan state parsial (misalnya event tersimpan tetapi stats tidak ter-update, atau sebaliknya). Dengan transaksi, sistem memperoleh atomicity dan consistency: perubahan state hanya terjadi bila seluruh rangkaian pemrosesan sukses.
+
+### 10.3 Mekanisme Teknis
+Transaksi database dilakukan pada consumer. Dedup dilakukan terlebih dahulu menggunakan tabel `processed_events` yang memiliki primary key `(topic, event_id)` dan operasi:
+- `INSERT ... ON CONFLICT DO NOTHING`  
+Jika insert berhasil (unik), event disimpan ke `events` dan stats dinaikkan sebagai unique. Jika insert gagal (duplikat), stats dinaikkan sebagai duplicate.
+
+### 10.4 Bukti Pengujian
+Keputusan desain transaksi dan konsistensi metrik didukung oleh pengujian:
+- `tests/test_dedup_idempotency.py::test_stats_invariant_received_ge_sum`  
+  Memastikan invariant statistik: `received >= unique_processed + duplicate_dropped`.
 
 ---
 
 ## 11. T9 – Kontrol Konkurensi (Fokus Bab 9)
-Kontrol konkurensi diimplementasikan menggunakan primary key unik pada tabel deduplication dan perintah `INSERT ... ON CONFLICT DO NOTHING`. Pendekatan ini memastikan bahwa hanya satu worker yang berhasil memproses event unik, meskipun beberapa worker mencoba memproses event yang sama secara paralel.
+### 11.1 Keputusan Desain
+Kontrol konkurensi diimplementasikan menggunakan:
+- constraint unik pada tabel dedup (`processed_events`), dan
+- operasi `INSERT ... ON CONFLICT DO NOTHING` di dalam transaksi.
 
-Isolation level yang digunakan adalah READ COMMITTED, yang dianggap cukup untuk kebutuhan sistem ini karena potensi race condition telah dimitigasi melalui constraint unik dan operasi upsert.
+### 11.2 Alasan dan Trade-off
+Dengan multi-worker consumer (`CONSUMER_WORKERS > 1`), dua worker dapat membaca event yang sama hampir bersamaan (race condition). Jika dedup dilakukan di memori, akan ada risiko double-processing saat restart atau bila worker berbeda. Dengan dedup di database, sistem memperoleh *single source of truth* yang persisten dan aman konkurensi.
+
+### 11.3 Mekanisme Teknis (Atomic Dedup)
+Dedup dilakukan secara atomik pada database melalui unique constraint sehingga hanya satu worker yang dapat “mengklaim” `(topic, event_id)` sebagai unik. Worker lain akan mendapatkan konflik dan diperlakukan sebagai duplikat, sehingga tidak menyimpan event kedua kali.
+
+Kalimat kunci:
+> Dedup dilakukan secara atomik di tingkat database menggunakan constraint unik dan transaksi, sehingga race condition tidak menghasilkan double-processing walaupun multi-worker.
+
+### 11.4 Bukti Pengujian Konkurensi
+Keamanan terhadap race condition dibuktikan melalui pengujian:
+- `tests/test_concurrency.py::test_parallel_duplicate_still_one`  
+  Duplikasi paralel tetap menghasilkan 1 event unik.
+- `tests/test_concurrency.py::test_parallel_unique_count_increases`  
+  Event paralel yang berbeda menaikkan unique count sesuai jumlah event unik.
 
 ---
 
 ## 12. T10 – Orkestrasi, Keamanan, dan Persistensi
 Docker Compose digunakan sebagai alat orkestrasi untuk menjalankan seluruh layanan dalam satu jaringan lokal. Pendekatan ini meningkatkan keamanan karena tidak ada layanan yang diekspos ke jaringan publik selain endpoint API untuk keperluan demo.
 
-Data disimpan menggunakan named volume PostgreSQL, sehingga tetap persisten meskipun container dihentikan atau dihapus.
+Data disimpan menggunakan named volume PostgreSQL (`pg_data`), sehingga tetap persisten meskipun container dihentikan atau dihapus. Selain itu, Redis juga menggunakan named volume (`redis_data`) untuk menjaga state stream/consumer group pada skenario tertentu saat demo.
+
+### 12.1 Bukti Persistensi (Restart/Recreate)
+Persistensi dibuktikan dengan:
+1) recreate container aggregator tanpa menghapus volume database, dan  
+2) memverifikasi data event dan metrik masih tersedia melalui endpoint `/events` dan `/stats`.
+
+Pengujian terkait persistensi tersedia pada:
+- `tests/test_persistence_restart.py::test_persistence_after_recreate`  
+  (Dapat dijalankan pada environment yang mengaktifkan docker-in-docker / `RUN_DOCKER=1` sesuai konfigurasi test.)
 
 ---
 
 ## 13. Evaluasi dan Pengujian
-Sistem diuji menggunakan unit dan integration tests sebanyak 14 test yang mencakup validasi skema event, deduplication, konkurensi, dan persistensi. Selain itu, dilakukan pengujian beban menggunakan publisher simulator untuk memproses lebih dari 20.000 event dengan tingkat duplikasi di atas 30%.
+Sistem diuji menggunakan unit dan integration tests sebanyak 14 test yang mencakup validasi skema event, deduplication, konkurensi, dan persistensi.
 
-Hasil pengujian menunjukkan bahwa sistem mampu mempertahankan konsistensi data dan tetap responsif di bawah beban paralel.
+### 13.1 Ringkasan Test yang Mendukung Keputusan Desain
+Berikut pemetaan keputusan desain terhadap bukti pengujian:
+
+| Aspek | Keputusan Desain | Bukti Pengujian (pytest) |
+|---|---|---|
+| Validasi API | Request schema harus valid (topic, event_id, timestamp, dsb.) | `tests/test_api_validation.py::*` |
+| Dedup & Idempotency | Dedup persisten di DB via `(topic,event_id)` + `ON CONFLICT DO NOTHING` | `test_dedup_same_event_only_one_in_events`, `test_dedup_across_batches` |
+| Konkurensi | Multi-worker aman race condition (atomic dedup di DB) | `test_parallel_duplicate_still_one`, `test_parallel_unique_count_increases` |
+| Statistik & Observability | Invariant stats konsisten | `test_stats_invariant_received_ge_sum`, `test_get_stats_has_keys` |
+| Persistensi | Data tidak hilang saat recreate container | `test_persistence_after_recreate` *(opsional tergantung env)* |
+
+### 13.2 Pengujian Beban
+Selain test otomatis, dilakukan pengujian beban menggunakan publisher simulator untuk memproses lebih dari 20.000 event dengan tingkat duplikasi di atas 30%. Hasil pengujian menunjukkan bahwa sistem mampu mempertahankan konsistensi data dan tetap responsif di bawah beban paralel.
 
 ---
 
 ## 14. Kesimpulan
-Berdasarkan hasil implementasi dan pengujian, dapat disimpulkan bahwa sistem Pub-Sub Log Aggregator yang dibangun telah berhasil memenuhi tujuan pembelajaran mata kuliah Sistem Terdistribusi. Penerapan idempotent consumer, deduplication persisten, serta transaksi dan kontrol konkurensi terbukti efektif dalam menjaga konsistensi sistem.
+Berdasarkan hasil implementasi dan pengujian, dapat disimpulkan bahwa sistem Pub-Sub Log Aggregator yang dibangun telah berhasil memenuhi tujuan pembelajaran mata kuliah Sistem Terdistribusi. Penerapan idempotent consumer, deduplication persisten, serta transaksi dan kontrol konkurensi terbukti efektif dalam menjaga konsistensi sistem pada kondisi retry, duplikasi, dan pemrosesan paralel.
 
 ---
 
